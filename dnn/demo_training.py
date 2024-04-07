@@ -10,6 +10,7 @@ import torch.utils.data
 import torch.nn.functional as F
 from demo_model import Dnn
 from dataset.dnn_dataloader import MyCustomDataset, UniqueLabelsSampler
+import warnings
 
 
 parser = argparse.ArgumentParser()
@@ -22,14 +23,14 @@ parser.add_argument(
 parser.add_argument(
     '--workers', type=int, help='number of data loading workers', default=4)
 parser.add_argument(
-    '--nepoch', type=int, default=25, help='number of epochs to train for')
+    '--nepoch', type=int, default=10, help='number of epochs to train for')
 parser.add_argument('--outf', type=str, default='../weight', help='output folder')
 parser.add_argument('--model', type=str, default='', help='model path')
 # parser.add_argument('--dataset', type=str, default='F:/ntu_120/train', required=True, help="dataset path")
 parser.add_argument('--dataset_type', type=str, default='NTU120', help="dataset type NTU120|Kinetics400|RWF200")
 
 opt = parser.parse_args()
-print(opt)
+# print(opt)
 
 # blue = lambda x: '\033[94m' + x + '\033[0m'
 # fix seed
@@ -39,10 +40,10 @@ random.seed(opt.manualSeed)
 torch.manual_seed(opt.manualSeed)
 
 # dataset, dataloader, num_classes
-train_dataset = MyCustomDataset(root_dir='F:/ntu_120/train', transform=None)
+train_dataset = MyCustomDataset(root_dir='C:/data_zyx/ntu_120/train', transform=None)
 sampler = UniqueLabelsSampler(train_dataset, batch_size=opt.batchSize, num_classes=opt.num_classes)
 # TODO:test dataset
-test_dataset = MyCustomDataset(root_dir='F:/ntu_120/val', transform=None)
+test_dataset = MyCustomDataset(root_dir='C:/data_zyx/ntu_120/test', transform=None)
 train_dataloader = torch.utils.data.DataLoader(
     train_dataset,
     sampler=sampler,
@@ -55,16 +56,18 @@ test_dataloader = torch.utils.data.DataLoader(
     shuffle=True,
     num_workers=int(opt.workers))
 # print(len(train_dataset), len(test_dataset))
-num_classes = len(train_dataset.classes)
+# num_classes = len(train_dataset.classes)
 # print('classes', num_classes)
-
+blue = lambda x: '\033[94m' + x + '\033[0m'
 try:
     os.makedirs(opt.outf)
 except OSError:
     pass
 
 if __name__ == '__main__':
-    classifier = Dnn(k=num_classes)
+    warnings.filterwarnings("ignore", category=UserWarning)
+    # print(num_classes)
+    classifier = Dnn(k=opt.num_classes)
     # 检查是否有可用的CUDA设备
     if torch.cuda.is_available():
         device = torch.device('cuda')  # 设备对象表示CUDA设备
@@ -91,33 +94,48 @@ if __name__ == '__main__':
             target = target[:, 0]
             points = points.transpose(2, 1)
             points, target = points.cuda(), target.cuda()
+            # print(points.size())
             optimizer.zero_grad()
             classifier = classifier.train()
-            pred, trans, trans_feat = classifier(points)
+            pred = classifier(points)
 
+            # print(pred.size(), target.size())
             loss = F.cross_entropy(pred, target)
             loss.backward()
             optimizer.step()
             pred_choice = pred.data.max(1)[1]
             correct = pred_choice.eq(target.data).cpu().sum()
-            print('[%d: %d/%d] train loss: %f accuracy: %f' % (
-            epoch, i, num_batch, loss.item(), correct.item() / float(opt.batchSize)))
+            print('[%d: %d/%d] train loss: %f accuracy: %f' % (epoch, i, num_batch, loss.item(), correct.item() / float(opt.batchSize)))
+
+            if i % 10 == 0:
+                j, data = next(enumerate(test_dataloader, 0))
+                points, target = data
+                target = target[:, 0]
+                points = points.transpose(2, 1)
+                points, target = points.cuda(), target.cuda()
+                classifier = classifier.eval()
+                pred = classifier(points)
+                loss = F.cross_entropy(pred, target)
+                pred_choice = pred.data.max(1)[1]
+                correct = pred_choice.eq(target.data).cpu().sum()
+                print('[%d: %d/%d] %s loss: %f accuracy: %f' % (epoch, i, num_batch, blue('test'), loss.item(), correct.item()/float(opt.batchSize)))
 
         torch.save(classifier.state_dict(), '%s/cls_model_%d.pth' % (opt.outf, epoch))
 
+    print('finish training')
     # validation
-    total_correct = 0
-    total_testset = 0
-    for i, data in tqdm(enumerate(test_dataloader, 0)):
-        points, target = data
-        target = target[:, 0]
-        points = points.transpose(2, 1)
-        points, target = points.cuda(), target.cuda()
-        classifier = classifier.eval()
-        pred, _, _ = classifier(points)
-        pred_choice = pred.data.max(1)[1]
-        correct = pred_choice.eq(target.data).cpu().sum()
-        total_correct += correct.item()
-        total_testset += points.size()[0]
-
-    print("final accuracy {}".format(total_correct / float(total_testset)))
+    # total_correct = 0
+    # total_testset = 0
+    # for i, data in tqdm(enumerate(test_dataloader, 0)):
+    #     points, target = data
+    #     target = target[:, 0]
+    #     points = points.transpose(2, 1)
+    #     points, target = points.cuda(), target.cuda()
+    #     classifier = classifier.eval()
+    #     pred, _, _ = classifier(points)
+    #     pred_choice = pred.data.max(1)[1]
+    #     correct = pred_choice.eq(target.data).cpu().sum()
+    #     total_correct += correct.item()
+    #     total_testset += points.size()[0]
+    #
+    # print("final accuracy {}".format(total_correct / float(total_testset)))

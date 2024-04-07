@@ -9,7 +9,8 @@ from transformers.utils import logging
 logger = logging.get_logger(__name__)
 
 '''
-bertclipconfig 通过引用clipconfig来定义本项目中需要的。
+这部分是完整预训练对比学习用到的configuration。目前已有bert部分，待修改dnn分类训练部分。
+bert-clip-config 通过引用clipconfig来定义本项目中需要的。
 待修改：将dnn的config形式与clip的方式对齐。。。
 '''
 

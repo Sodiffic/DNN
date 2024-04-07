@@ -1,6 +1,7 @@
 import os
 import random
 import torch
+import PIL
 import numpy as np
 from torch.utils.data import Dataset
 from torch.utils.data import sampler
@@ -67,8 +68,7 @@ class UniqueLabelsSampler(sampler.Sampler):
             self.label_to_indices[label] = torch.randperm(len(self.label_to_indices[label])).tolist()
 
         # 计算总共可以组成多少个完整的batch
-        self.num_samples = min(len(indices) for indices in self.label_to_indices.values()) * self.batch_size
-        print('总共可以组成的完整的batch', self.num_samples)
+        self.num_samples = len(data_source)
 
     #
     def reset_label_to_indices(self):
@@ -97,7 +97,7 @@ class UniqueLabelsSampler(sampler.Sampler):
                 remaining_labels = [l for l in self.label_to_indices if len(self.label_to_indices[l]) > 0]
                 if not remaining_labels:
                     break  # 如果所有类别的样本都用完了，就退出循环
-                label = torch.choice(remaining_labels)  # 随机选择一个还有剩余样本的类别
+                label = random.choice(remaining_labels)  # 随机选择一个还有剩余样本的类别
                 idx = self.label_to_indices[label].pop(0)
                 batch_indices.append(idx)
                 # for label in self.label_to_indices:

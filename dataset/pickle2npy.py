@@ -75,7 +75,6 @@ for item in tqdm(annotation_dict, total=len(annotation_dict)):
 
             # 关节索引归一化，帧索引归一化
             data_numpy[t, m, :, 1] /= num_joint
-            data_numpy[t, m, :, 0] /= max_frame
 
     # 根据置信度对五个人排序
     if keypoint.shape[0] > num_person_out:
@@ -90,9 +89,11 @@ for item in tqdm(annotation_dict, total=len(annotation_dict)):
     # 如果帧数大于300，则截断到300帧
     else:
         data_numpy = data_numpy[:max_frame, :, :, :]
+    max_frame_indices = np.arange(max_frame)[:, None, None]
+    data_numpy[:, :, :, 0] = max_frame_indices / max_frame
 
     # print(data_numpy.shape)
-    print(data_numpy)
+    # print(data_numpy)
 
     np.save(save_file_path+str(label)+'_'+file_name, data_numpy)
 

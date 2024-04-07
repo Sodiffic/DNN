@@ -1,7 +1,7 @@
 from transformers import PretrainedConfig
 from typing import List
 '''
-用自己的方法改写dnn对应的config
+用自己的方法改写dnn对应的config，待完成对接
 '''
 class ResnetConfig(PretrainedConfig):
     model_type = "resmlp"

@@ -1,5 +1,6 @@
 from __future__ import print_function
 import torch
+import PIL
 import torch.nn as nn
 import torch.nn.parallel
 import torch.utils.data
@@ -29,28 +30,28 @@ class BasicBlock(nn.Module):
 
     def forward(self, x):
         shortcut = x
-        print(x.shape)
+        # print(x.shape)
         x = F.relu(self.bn1(self.conv1(x)))
-        print(x.shape)
+        # print(x.shape)
         x = F.relu(self.bn1(self.conv2(x)))
-        print(x.shape)
+        # print(x.shape)
         x = self.bn2(self.conv3(x))
-        print(x.shape)
+        # print(x.shape)
 
         return F.relu(x + self.shortcut_conv(shortcut))
 
 
 class Dnn(nn.Module):
-    def __init__(self, k=2, stage=[2, 2, 2, 2]):
+    def __init__(self, k=2, stage=[1,1,1,1]):
         super(Dnn, self).__init__()
         self.k = k
-        self.conv1 = nn.Conv1d(7, 32, 1)
-        self.bn1 = nn.BatchNorm1d(32)
-        self.bn2 = nn.BatchNorm1d(512)
-        self.bn3 = nn.BatchNorm1d(256)
+        self.conv1 = nn.Conv1d(7, 16, 1)
+        self.bn1 = nn.BatchNorm1d(16)
+        self.bn2 = nn.BatchNorm1d(256)
+        self.bn3 = nn.BatchNorm1d(128)
         self.get_feature_list = []
-        in_chan = 32
-        out_chan = 128
+        in_chan = 16
+        out_chan = 64
         for i in range(len(stage)):  # 每个stage内的block数
             for j in range(0, stage[i]):
                 """
@@ -64,35 +65,35 @@ class Dnn(nn.Module):
                 out_chan = out_chan if (j==0 and stage[i]>1) else out_chan*2
 
         self.dropout = nn.Dropout(p=0.3)
-        self.fc1 = nn.Linear(1024, 512)
-        self.fc2 = nn.Linear(512, 256)
-        self.fc3 = nn.Linear(256, k)
+        self.fc1 = nn.Linear(512, 256)
+        self.fc2 = nn.Linear(256, 128)
+        self.fc3 = nn.Linear(128, k)
         # TODO:待修改
         self.get_feature_list = nn.ModuleList(self.get_feature_list)
 
     def forward(self, x):
         # 第一层mlp
-        print(x.shape)
+        # print(x.shape)
         x = F.relu(self.bn1(self.conv1(x)))  # (batch, n_pts, 7)--> [30, 32, 10200]
-        print(x.shape)
+        # print(x.shape)
         # residual mlp blocks
         i = 0
         for get_feature in self.get_feature_list:
             x = get_feature(x)
             i += 1
-            print(i,':', x.shape, '\n')
+            # print(i,':', x.shape, '\n')
 
         # Maxpooling
         x = torch.max(x, 2, keepdim=True)[0]
-        x = x.view(-1, 1024)  # 调整形状 (batch_size,1024)
-        print(x.shape)
+        x = x.view(-1, 512)  # 调整形状 (batch_size,1024)
+        # print(x.shape)
         # TODO:还差一个classification。。。下午来写
 
         x = F.relu(self.bn2(self.fc1(x)))  # (batch_size,512)
         x = F.relu(self.bn3(self.dropout(self.fc2(x))))  # (batch_size,256)
         x = self.fc3(x)  # (batch_size,k)
         # 返回的是该点云是第ki类的对数概率分布
-
+        # print('k的大小：',self.k, '全连接后的大小：',x.size())
         return F.log_softmax(x, dim=1)
 
 if __name__ == '__main__':

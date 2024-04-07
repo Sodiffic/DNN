@@ -1,19 +1,28 @@
 import math
-import timm
 import torch
 import torch.nn as nn
 import torch.nn.parallel
 import torch.utils.data
 import numpy as np
+import timm
 import torch.nn.functional as F
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
-from timm.model._builder import build_model_with_cfg
-from timm.model._manipulate import checkpoint_seq
+from timm.layers import DropBlock2d, DropPath, AvgPool2dSame, BlurPool2d, GroupNorm, LayerType, create_attn, \
+    get_attn, get_act_layer, get_norm_layer, create_classifier
+from timm.models._builder import build_model_with_cfg
+from timm.models._manipulate import checkpoint_seq
 from timm.layers import LayerType, create_classifier
-from timm.model._registry import register_model, generate_default_cfgs, register_model_deprecations
+from timm.models._registry import register_model, generate_default_cfgs, register_model_deprecations
 
-
-class BasicBlock(nn.Module):  # 定义基本块,用于resnet18 resnet34的情况
+"""
+      stage1: [32->32->32->128][128->32->32->128]
+      stage2: [128->64->64->256][256->64->64->256]
+      stage3: [256->128->128->512][512->128->128->512]
+      stage4: [512->256->256->1024][1024->256->256->1024]
+      pooling-full_connect:
+      1024-512-256-k
+"""
+class BasicBlock(nn.Module):
     expansion = 1
 
     def __init__(
@@ -58,61 +67,57 @@ class BasicBlock(nn.Module):  # 定义基本块,用于resnet18 resnet34的情况
         assert base_width == 64, 'BasicBlock does not support changing base width'
         first_planes = planes // reduce_first
         outplanes = planes * self.expansion  # 计算卷积层输出通道的数量
-        # first_dilation = first_dilation or dilation  # 如果first_dilation是一个非假值，那么保持其原值；否则，first_dilation被赋值为dilation。
-        # use_aa = aa_layer is not None and (stride == 2 or first_dilation != dilation) # 是否使用抗锯齿层
+        first_dilation = first_dilation or dilation  # 如果first_dilation是一个非假值，那么保持其原值；否则，first_dilation被赋值为dilation。
+        use_aa = aa_layer is not None and (stride == 2 or first_dilation != dilation)  # 是否应该使用抗锯齿（anti-aliasing，简称aa）层
 
-        # TODO：修改conv1
         self.conv1 = nn.Conv2d(
             inplanes, first_planes, kernel_size=3, stride=1 if use_aa else stride, padding=first_dilation,
             dilation=first_dilation, bias=False)
         self.bn1 = norm_layer(first_planes)
-        # self.drop_block = drop_block() if drop_block is not None else nn.Identity()
+        self.drop_block = drop_block() if drop_block is not None else nn.Identity()
         self.act1 = act_layer(inplace=True)
-        # self.aa = create_aa(aa_layer, channels=first_planes, stride=stride, enable=use_aa)
+        self.aa = create_aa(aa_layer, channels=first_planes, stride=stride, enable=use_aa)
 
-        # TODO：修改conv1
         self.conv2 = nn.Conv2d(
             first_planes, outplanes, kernel_size=3, padding=dilation, dilation=dilation, bias=False)
         self.bn2 = norm_layer(outplanes)
 
-        # self.se = create_attn(attn_layer, outplanes)
+        self.se = create_attn(attn_layer, outplanes)
 
         self.act2 = act_layer(inplace=True)
         self.downsample = downsample
-        # self.stride = stride
-        # self.dilation = dilation
-        # self.drop_path = drop_path
+        self.stride = stride
+        self.dilation = dilation
+        self.drop_path = drop_path
 
     def zero_init_last(self):
-        r"""对某个对象（通常是一个神经网络层或模块）的 bn2 属性中的 weight 参数进行初始化，将其设置为全零"""
         if getattr(self.bn2, 'weight', None) is not None:
             nn.init.zeros_(self.bn2.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         shortcut = x
-        # block1:conv-bn-relu
+
         x = self.conv1(x)
         x = self.bn1(x)
-        # x = self.drop_block(x)
+        x = self.drop_block(x)
         x = self.act1(x)
-        # x = self.aa(x)
-        # block2:
+        x = self.aa(x)
+
         x = self.conv2(x)
         x = self.bn2(x)
 
-        # if self.se is not None:
-        #     x = self.se(x)
-        #
-        # if self.drop_path is not None:
-        #     x = self.drop_path(x)
-        #
+        if self.se is not None:
+            x = self.se(x)
+
+        if self.drop_path is not None:
+            x = self.drop_path(x)
+
         if self.downsample is not None:
             shortcut = self.downsample(shortcut)
         x += shortcut
         x = self.act2(x)
 
         return x
-
 
 class Bottleneck(nn.Module):
     r"""basic bottleneck?"""
@@ -122,7 +127,7 @@ class Bottleneck(nn.Module):
             self,
             inplanes: int,
             planes: int,
-            stride: int = 1,
+            stride: int = 0,
             downsample: Optional[nn.Module] = None,
             cardinality: int = 1,
             base_width: int = 64,
@@ -130,7 +135,7 @@ class Bottleneck(nn.Module):
             dilation: int = 1,
             first_dilation: Optional[int] = None,
             act_layer: Type[nn.Module] = nn.ReLU,
-            norm_layer: Type[nn.Module] = nn.BatchNorm2d,
+            norm_layer: Type[nn.Module] = nn.BatchNorm1d,
             attn_layer: Optional[Type[nn.Module]] = None,
             aa_layer: Optional[Type[nn.Module]] = None,
             drop_block: Optional[Type[nn.Module]] = None,
@@ -162,7 +167,7 @@ class Bottleneck(nn.Module):
         first_dilation = first_dilation or dilation
         # use_aa = aa_layer is not None and (stride == 2 or first_dilation != dilation)
 
-        self.conv1 = nn.Conv2d(inplanes, first_planes, kernel_size=1, bias=False)
+        self.conv1 = nn.Conv1d(inplanes, first_planes)
         self.bn1 = norm_layer(first_planes)
         self.act1 = act_layer(inplace=True)
 
@@ -232,16 +237,12 @@ def downsample_conv(
         norm_layer: Optional[Type[nn.Module]] = None,
 ) -> nn.Module:
     r"""我需要用这个下采样改变输入的权重。其实对我来说只是一个conv1d（？是否需要？）"""
-    norm_layer = norm_layer or nn.BatchNorm2d
+    norm_layer = norm_layer or nn.BatchNorm1d
     kernel_size = 1 if stride == 1 and dilation == 1 else kernel_size
     first_dilation = (first_dilation or dilation) if kernel_size > 1 else 1
     p = get_padding(kernel_size, stride, first_dilation)
 
-    return nn.Sequential(*[
-        nn.Conv2d(
-            in_channels, out_channels, kernel_size, stride=stride, padding=p, dilation=first_dilation, bias=False),
-        norm_layer(out_channels)
-    ])
+    return nn.Sequential(*[nn.Conv1d(in_channels, out_channels), norm_layer(out_channels)])  # 很怪 这里不做
 
 
 def downsample_avg(
@@ -268,7 +269,7 @@ def downsample_avg(
         norm_layer(out_channels)
     ])
 
-
+# 用于将每一个stage里的block连接起来
 def make_blocks(
         block_fn: Union[BasicBlock, Bottleneck],
         channels: List[int],
@@ -315,7 +316,7 @@ def make_blocks(
         block_kwargs = dict(reduce_first=reduce_first, dilation=dilation, drop_block=db, **kwargs)
         blocks = []
         for block_idx in range(num_blocks):
-            downsample = downsample if block_idx == 0 else None
+            downsample = downsample if block_idx == 0 else None  #
             stride = stride if block_idx == 0 else 1
             block_dpr = drop_path_rate * net_block_idx / (net_num_blocks - 1)  # stochastic depth linear decay rule
             blocks.append(block_fn(
@@ -338,34 +339,15 @@ def make_blocks(
 
 
 class ResNet(nn.Module):
-    """ResNet / ResNeXt / SE-ResNeXt / SE-Net
-
-    此类实现了ResNet、ResNeXt、SE ResNeXt和SENet的所有变体：
-     * 在3x3 conv瓶颈层中有>1步
-     * 有conv-bn-act顺序
-
-    此ResNet impl支持基于MXNet Gloon ResNetV1b模型中包含的v1c、v1d、v1e和v1s变体的许多干采样和下采样选项。
-    C和D变体也在“技巧袋”论文中进行了讨论：https://arxiv.org/pdf/1812.01187.
-    B变体相当于torchvision默认值。
-
-    ResNet变体（同样的修改也可用于SE/ResNeXt模型）：
-      * b - 7x7 stem, stem_width = 64, same as torchvision ResNet, NVIDIA ResNet 'v1.5', Gluon v1b (normal)
-      * c - 3 layer deep 3x3 stem, stem_width = 32 (32, 32, 64)
-      * d - 3 layer deep 3x3 stem, stem_width = 32 (32, 32, 64), average pool in downsample
-      * e - 3 layer deep 3x3 stem, stem_width = 64 (64, 64, 128), average pool in downsample
-      * s - 3 layer deep 3x3 stem, stem_width = 64 (64, 64, 128)
-      * t - 3 layer deep 3x3 stem, stem width = 32 (24, 48, 64), average pool in downsample
-      * tn - 3 layer deep 3x3 stem, stem width = 32 (24, 32, 64), average pool in downsample
-    """
 
     def __init__(
             self,
-            block: Union[BasicBlock, Bottleneck],
+            block: Union[BasicBlock, Bottleneck],  # BasicBlock和 Bottleneck
             layers: List[int],
             num_classes: int = 1000,
             in_chans: int = 3,
             output_stride: int = 32,
-            global_pool: str = 'avg',
+            global_pool: str = 'max',
             cardinality: int = 1,
             base_width: int = 64,
             stem_width: int = 64,
@@ -423,48 +405,50 @@ class ResNet(nn.Module):
         act_layer = get_act_layer(act_layer)
         norm_layer = get_norm_layer(norm_layer)
 
-        # Stem
+        # Stem部分
         deep_stem = 'deep' in stem_type
-        inplanes = stem_width * 2 if deep_stem else 64
-        if deep_stem:
-            stem_chs = (stem_width, stem_width)
-            if 'tiered' in stem_type:
-                stem_chs = (3 * (stem_width // 4), stem_width)
-            self.conv1 = nn.Sequential(*[
-                nn.Conv2d(in_chans, stem_chs[0], 3, stride=2, padding=1, bias=False),
-                norm_layer(stem_chs[0]),
-                act_layer(inplace=True),
-                nn.Conv2d(stem_chs[0], stem_chs[1], 3, stride=1, padding=1, bias=False),
-                norm_layer(stem_chs[1]),
-                act_layer(inplace=True),
-                nn.Conv2d(stem_chs[1], inplanes, 3, stride=1, padding=1, bias=False)])
-        else:
-            self.conv1 = nn.Conv2d(in_chans, inplanes, kernel_size=7, stride=2, padding=3, bias=False)
+        inplanes = stem_width * 2 if deep_stem else 64  # input:
+        # if deep_stem:
+        #     stem_chs = (stem_width, stem_width)
+        #     if 'tiered' in stem_type:
+        #         stem_chs = (3 * (stem_width // 4), stem_width)
+        #     self.conv1 = nn.Sequential(*[
+        #         nn.Conv2d(in_chans, stem_chs[0], 3, stride=2, padding=1, bias=False),
+        #         norm_layer(stem_chs[0]),
+        #         act_layer(inplace=True),
+        #         nn.Conv2d(stem_chs[0], stem_chs[1], 3, stride=1, padding=1, bias=False),
+        #         norm_layer(stem_chs[1]),
+        #         act_layer(inplace=True),
+        #         nn.Conv2d(stem_chs[1], inplanes, 3, stride=1, padding=1, bias=False)])
+        # else:
+        #     self.conv1 = nn.Conv2d(in_chans, inplanes, kernel_size=7, stride=2, padding=3, bias=False)
+        """stem部分这么改了，改成一层mlp"""
+        self.conv1 = nn.Conv1d(in_chans, inplanes)
         self.bn1 = norm_layer(inplanes)
         self.act1 = act_layer(inplace=True)
         self.feature_info = [dict(num_chs=inplanes, reduction=2, module='act1')]
-
+        self.maxpool = nn.MaxPool1d(1) # 不确定这么写对不对
         # Stem pooling. The name 'maxpool' remains for weight compatibility.
-        if replace_stem_pool:
-            self.maxpool = nn.Sequential(*filter(None, [
-                nn.Conv2d(inplanes, inplanes, 3, stride=1 if aa_layer else 2, padding=1, bias=False),
-                create_aa(aa_layer, channels=inplanes, stride=2) if aa_layer is not None else None,
-                norm_layer(inplanes),
-                act_layer(inplace=True),
-            ]))
-        else:
-            if aa_layer is not None:
-                if issubclass(aa_layer, nn.AvgPool2d):
-                    self.maxpool = aa_layer(2)
-                else:
-                    self.maxpool = nn.Sequential(*[
-                        nn.MaxPool2d(kernel_size=3, stride=1, padding=1),
-                        aa_layer(channels=inplanes, stride=2)])
-            else:
-                self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        # if replace_stem_pool:
+        #     self.maxpool = nn.Sequential(*filter(None, [
+        #         nn.Conv2d(inplanes, inplanes, 3, stride=1 if aa_layer else 2, padding=1, bias=False),
+        #         create_aa(aa_layer, channels=inplanes, stride=2) if aa_layer is not None else None,
+        #         norm_layer(inplanes),
+        #         act_layer(inplace=True),
+        #     ]))
+        # else:
+        #     if aa_layer is not None:
+        #         if issubclass(aa_layer, nn.AvgPool2d):
+        #             self.maxpool = aa_layer(2)
+        #         else:
+        #             self.maxpool = nn.Sequential(*[
+        #                 nn.MaxPool2d(kernel_size=3, stride=1, padding=1),
+        #                 aa_layer(channels=inplanes, stride=2)])
+        #     else:
+        #         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
         # Feature Blocks
-        channels = [64, 128, 256, 512]
+        channels = [32, 64, 128, 256]  # 通道数
         stage_modules, stage_feature_info = make_blocks(
             block,
             channels,
@@ -496,7 +480,8 @@ class ResNet(nn.Module):
     @torch.jit.ignore
     def init_weights(self, zero_init_last: bool = True):
         for n, m in self.named_modules():
-            if isinstance(m, nn.Conv2d):
+            # 对relu进行初始化
+            if isinstance(m, nn.Conv1d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
         if zero_init_last:
             for m in self.modules():
@@ -521,14 +506,17 @@ class ResNet(nn.Module):
         self.global_pool, self.fc = create_classifier(self.num_features, self.num_classes, pool_type=global_pool)
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        # stem部分：卷积+batchNorm+relu+max_pooling
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.act1(x)
         x = self.maxpool(x)
 
         if self.grad_checkpointing and not torch.jit.is_scripting():
+            # 进行梯度检查
             x = checkpoint_seq([self.layer1, self.layer2, self.layer3, self.layer4], x, flatten=True)
         else:
+            # 不进行梯度检查
             x = self.layer1(x)
             x = self.layer2(x)
             x = self.layer3(x)
@@ -536,12 +524,14 @@ class ResNet(nn.Module):
         return x
 
     def forward_head(self, x: torch.Tensor, pre_logits: bool = False) -> torch.Tensor:
+        """两部分：池化+全连接"""
         x = self.global_pool(x)
         if self.drop_rate:
             x = F.dropout(x, p=float(self.drop_rate), training=self.training)
         return x if pre_logits else self.fc(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        r"""最主要的部分，一个是forward_feature, 一个是forward_head"""
         x = self.forward_features(x)
         x = self.forward_head(x)
         return x
